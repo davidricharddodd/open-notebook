@@ -68,8 +68,8 @@ ENV HOSTNAME=0.0.0.0
 # Setup directories and permissions
 RUN mkdir -p /app/data /mydata
 
-# Ensure wait-for-api script is executable
-RUN chmod +x /app/scripts/wait-for-api.sh
+# Ensure scripts are executable
+RUN chmod +x /app/scripts/wait-for-api.sh /app/scripts/entrypoint.sh
 
 # Copy supervisord configuration
 COPY supervisord.single.conf /etc/supervisor/conf.d/supervisord.conf
@@ -80,5 +80,5 @@ RUN mkdir -p /var/log/supervisor
 # Expose ports
 EXPOSE 8502 5055
 
-# Set startup command
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Set startup command (entrypoint raises file descriptor limits for podcast audio combining)
+CMD ["/app/scripts/entrypoint.sh"]
