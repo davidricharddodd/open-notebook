@@ -12,6 +12,10 @@ from open_notebook.podcasts.models import EpisodeProfile, PodcastEpisode, Speake
 
 try:
     from podcast_creator import configure, create_podcast
+
+    # Patch: replace moviepy-based audio combining with ffmpeg concat demuxer
+    # This fixes [Errno 11] Resource temporarily unavailable in constrained containers
+    import patches.ffmpeg_combine_patch  # noqa: F401
 except ImportError as e:
     logger.error(f"Failed to import podcast_creator: {e}")
     raise ValueError("podcast_creator library not available")
