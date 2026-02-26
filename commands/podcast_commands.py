@@ -1,6 +1,8 @@
+import subprocess
 import time
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from loguru import logger
 from pydantic import BaseModel
@@ -12,13 +14,118 @@ from open_notebook.podcasts.models import EpisodeProfile, PodcastEpisode, Speake
 
 try:
     from podcast_creator import configure, create_podcast
-
-    # Patch: replace moviepy-based audio combining with ffmpeg concat demuxer
-    # This fixes [Errno 11] Resource temporarily unavailable in constrained containers
-    import patches.ffmpeg_combine_patch  # noqa: F401
+    import podcast_creator.core as _podcast_core
 except ImportError as e:
     logger.error(f"Failed to import podcast_creator: {e}")
     raise ValueError("podcast_creator library not available")
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: replace moviepy combine_audio_files with ffmpeg concat demuxer
+# Fixes [Errno 11] Resource temporarily unavailable in constrained containers
+# ---------------------------------------------------------------------------
+async def _combine_audio_files_ffmpeg(
+    audio_dir: Union[Path, str],
+    final_filename: str,
+    final_output_dir: Union[Path, str],
+) -> dict:
+    if isinstance(audio_dir, str):
+        audio_dir = Path(audio_dir)
+    if isinstance(final_output_dir, str):
+        final_output_dir = Path(final_output_dir)
+
+    list_of_audio_paths = sorted(audio_dir.glob("*.mp3"))
+    if not list_of_audio_paths:
+        logger.warning("combine_audio_files_ffmpeg: No audio files found.")
+        return {"combined_audio_path": "ERROR: No audio segment data"}
+
+    logger.info(
+        "combine_audio_files_ffmpeg: Found %d clips to combine",
+        len(list_of_audio_paths),
+    )
+
+    final_output_dir.mkdir(parents=True, exist_ok=True)
+
+    if final_filename and isinstance(final_filename, str):
+        output_filename = Path(final_filename).name
+        if not output_filename.endswith(".mp3"):
+            output_filename += ".mp3"
+    else:
+        output_filename = "combined_" + uuid.uuid4().hex + ".mp3"
+
+    output_path = final_output_dir / output_filename
+    concat_list_path = audio_dir / "_concat_list.txt"
+
+    try:
+        with open(concat_list_path, "w") as f:
+            for clip_path in list_of_audio_paths:
+                resolved = str(clip_path.resolve())
+                escaped = resolved.replace("'", "'\\''")
+                f.write("file '" + escaped + "'\n")
+
+        logger.info("combine_audio_files_ffmpeg: Running ffmpeg concat...")
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list_path),
+                "-c", "copy",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        if result.returncode != 0:
+            logger.error("ffmpeg concat failed: %s", result.stderr)
+            return {
+                "combined_audio_path": "ERROR: ffmpeg concat failed - "
+                + result.stderr[:500]
+            }
+
+        duration = 0.0
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-show_entries", "format=duration",
+                    "-of", "csv=p=0",
+                    str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                duration = float(probe.stdout.strip())
+        except Exception as exc:
+            logger.warning("Could not get duration: %s", exc)
+
+        logger.info(
+            "combine_audio_files_ffmpeg: Success -> %s (%.1fs)",
+            output_path,
+            duration,
+        )
+        return {
+            "combined_audio_path": str(output_path.resolve()),
+            "original_segments_count": len(list_of_audio_paths),
+            "total_duration_seconds": duration,
+        }
+
+    except Exception as exc:
+        logger.error("combine_audio_files_ffmpeg: Error: %s", exc)
+        return {"combined_audio_path": "ERROR: Failed to combine audio - " + str(exc)}
+
+    finally:
+        if concat_list_path.exists():
+            concat_list_path.unlink()
+
+
+_podcast_core.combine_audio_files = _combine_audio_files_ffmpeg
+logger.info(
+    "PATCH APPLIED: podcast_creator.core.combine_audio_files -> ffmpeg concat demuxer"
+)
 
 
 def full_model_dump(model):
